@@ -50,6 +50,213 @@ void env_close(const struct rjd_window_environment* env)
 	rjd_mem_free(app->window);
 }
 
+void meshes_init_chess(struct app_data* app)
+{
+	// "binmesh" file format: [uint32_t num verts][uint32_t num inds][verts float3...][inds uint32_t * 3 ...]
+	const char* mesh_paths[] = { "pawn.binmesh", "bishop.binmesh", "castle.binmesh", "knight.binmesh", "king.binmesh", "pawn.binmesh" };
+	int num_meshes = rjd_countof(mesh_paths);
+	app->gfx.meshes = rjd_array_alloc(struct rjd_gfx_mesh, num_meshes, app->allocator);
+
+	// meshes
+	for (int i = 0; i < num_meshes; ++i)
+	{
+		uint32_t num_verts = 0, num_tris = 0;
+		void *verts = NULL, *inds = NULL;
+		{
+			char* file_buffer = NULL;
+			struct rjd_result result = rjd_fio_read(mesh_paths[i], &file_buffer, app->allocator);
+			RJD_ASSERT(result.error == NULL);
+			int file_size = rjd_array_count(file_buffer);
+			RJD_ASSERT(file_size > sizeof(uint32_t) * 2);
+
+			char* file_iter = file_buffer;
+
+			memcpy(&num_verts, file_iter, sizeof(num_verts));
+			file_iter += sizeof(num_verts);
+			memcpy(&num_tris, file_iter, sizeof(num_tris));
+			file_iter += sizeof(num_tris);
+			RJD_ASSERT(file_size == sizeof(uint32_t) * 2 + num_verts * sizeof(float) * 3 + num_tris * sizeof(uint32_t) * 3);
+
+			verts = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
+			memcpy(verts, file_iter, num_verts * 3 * sizeof(float));
+			file_iter += num_verts * 3 * sizeof(float);
+
+			inds = rjd_mem_alloc_array(uint32_t, num_tris * 3, app->allocator);
+			memcpy(inds, file_iter, num_tris * 3 * sizeof(uint32_t));
+			file_iter += num_tris * 3 * sizeof(uint32_t);
+
+			// verify we reached end of file
+			RJD_ASSERT(file_iter == file_buffer + file_size);
+		}
+
+		const rjd_math_vec4 k_red = rjd_math_vec4_xyzw(1, 0, 0, 1);
+		const rjd_math_vec4 k_green = rjd_math_vec4_xyzw(0, 1, 0, 1);
+		const rjd_math_vec4 k_blue = rjd_math_vec4_xyzw(0, 0, 1, 1);
+
+		float* tints = rjd_mem_alloc_array(float, num_verts * 4, app->allocator);
+		for (uint32_t i = 0; i < num_verts; ++i) {
+			if(i%3 == 0)
+				rjd_math_vec4_write_unaligned(k_red, tints + i);
+			else if(i%3 == 1)
+				rjd_math_vec4_write_unaligned(k_green, tints + i);
+			else
+				rjd_math_vec4_write_unaligned(k_blue, tints + i);
+		}
+
+		struct rjd_gfx_mesh_vertex_buffer_desc buffers_desc[] =
+		{
+			// vertices
+			{
+				.common = {
+					.vertex = {
+						.data = verts,
+						.length = num_verts * sizeof(float) * 3,
+						.stride = sizeof(float) * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+				.buffer_index = 0,
+			},
+			// tints
+			//{
+			//	.common = {
+			//		.vertex = {
+			//			.data = tints,
+			//			.length = num_verts * sizeof(float) * 4,
+			//			.stride = sizeof(float) * 4,
+			//		}
+			//	},
+			//	.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+			//	.buffer_index = 1,
+			//},
+			// indices
+			{
+				.common = {
+					.index = {
+						.data = inds,
+						.length = num_tris * sizeof(uint32_t) * 3,
+						.stride = sizeof(uint32_t),
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_INDEX,
+				.buffer_index = 0, // "slot" in d3d. Not used at all for indices
+			},
+			// constants
+			{
+				.common = {
+					.constant = {
+						.capacity = rjd_math_maxu32(sizeof(struct shader_constants), 256) * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
+				.buffer_index = 2,
+			}
+		};
+
+		struct rjd_gfx_mesh_vertexed_desc desc =
+		{
+			.primitive = RJD_GFX_PRIMITIVE_TYPE_INDEXED_TRIANGLES,
+			.buffers = buffers_desc,
+			.count_buffers = rjd_countof(buffers_desc),
+			.count_vertices = num_verts,
+			.count_indices = num_tris * 3,
+		};
+
+		struct rjd_gfx_mesh* mesh = rjd_array_push_no_init(app->gfx.meshes);
+		struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, mesh, desc);
+		if (!rjd_result_isok(result)) {
+			RJD_ASSERT(rjd_result_isok(result));
+			RJD_LOG("Error creating mesh: %s", result.error);
+		}
+
+		rjd_mem_free(verts);
+		rjd_mem_free(inds);
+		rjd_mem_free(tints);
+	}
+}
+
+void meshes_init_procedural(struct app_data* app)
+{
+	app->gfx.meshes = rjd_array_alloc(struct rjd_gfx_mesh, RJD_PROCGEO_TYPE_COUNT, app->allocator);
+
+	// meshes
+	for (enum rjd_procgeo_type geo = 0; geo < RJD_PROCGEO_TYPE_COUNT; ++geo)
+	{
+		const float shape_size = .5;
+		const uint32_t tesselation = 16;
+
+		const uint32_t num_verts = rjd_procgeo_calc_num_verts(geo, tesselation);
+		float* positions = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
+		rjd_procgeo(geo, tesselation, shape_size, shape_size, shape_size, positions, num_verts * 3, 0);
+
+		const rjd_math_vec4 k_red = rjd_math_vec4_xyzw(1,0,0,1);
+		const rjd_math_vec4 k_green = rjd_math_vec4_xyzw(0,1,0,1);
+		const rjd_math_vec4 k_blue = rjd_math_vec4_xyzw(0,0,1,1);
+
+		float* tints = rjd_mem_alloc_array(float, num_verts * 4, app->allocator);
+		for (uint32_t i = 0; i < num_verts * 4; i += 12) {
+			rjd_math_vec4_write(k_red, tints + i);
+			rjd_math_vec4_write(k_green, tints + i + 4);
+			rjd_math_vec4_write(k_blue, tints + i + 8);
+		}
+
+		struct rjd_gfx_mesh_vertex_buffer_desc buffers_desc[] =
+		{
+			// vertices
+			{
+				.common = {
+					.vertex = {
+						.data = positions,
+						.length = num_verts * sizeof(float) * 3,
+						.stride = sizeof(float) * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+				.buffer_index = 0,
+			},
+			// tints
+			{
+				.common = {
+					.vertex = {
+						.data = tints,
+						.length = num_verts * sizeof(float) * 4,
+						.stride = sizeof(float) * 4,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+				.buffer_index = 1,
+			},
+			// constants
+			{
+				.common = {
+					.constant = {
+						.capacity = rjd_math_maxu32(sizeof(struct shader_constants), 256) * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
+				.buffer_index = 2,
+			}
+		};
+
+		struct rjd_gfx_mesh_vertexed_desc desc =
+		{
+			.primitive = RJD_GFX_PRIMITIVE_TYPE_TRIANGLES,
+			.buffers = buffers_desc,
+			.count_buffers = rjd_countof(buffers_desc),
+			.count_vertices = num_verts,
+		};
+
+		struct rjd_gfx_mesh* mesh = rjd_array_push_no_init(app->gfx.meshes);
+		struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, mesh, desc);
+		if (!rjd_result_isok(result)) {
+			RJD_LOG("Error creating mesh: %s", result.error);
+		}
+
+		rjd_mem_free(positions);
+		rjd_mem_free(tints);
+	}
+}
+
 void window_init(struct rjd_window* window, const struct rjd_window_environment* env)
 {
 	struct app_data* app = env->userdata;
@@ -63,7 +270,6 @@ void window_init(struct rjd_window* window, const struct rjd_window_environment*
 	app->gfx.shader_vertex = rjd_mem_alloc(struct rjd_gfx_shader, app->allocator);
 	app->gfx.shader_pixel = rjd_mem_alloc(struct rjd_gfx_shader, app->allocator);
 	app->gfx.pipeline_state = rjd_mem_alloc(struct rjd_gfx_pipeline_state, app->allocator);
-	app->gfx.meshes = rjd_mem_alloc_array(struct rjd_gfx_mesh, RJD_PROCGEO_TYPE_COUNT, app->allocator);
 
 	{
 		uint32_t msaa_sample_counts[] = { 16, 8, 4, 2, 1 };
@@ -206,81 +412,8 @@ void window_init(struct rjd_window* window, const struct rjd_window_environment*
 			}
 		}
 
-		// meshes
-		for (enum rjd_procgeo_type geo = 0; geo < RJD_PROCGEO_TYPE_COUNT; ++geo)
-		{
-			const float shape_size = .5;
-			const uint32_t tesselation = 16;
- 
-			const uint32_t num_verts = rjd_procgeo_calc_num_verts(geo, tesselation);
-			float* positions = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
-			rjd_procgeo(geo, tesselation, shape_size, shape_size, shape_size, positions, num_verts * 3, 0);
-
-			const rjd_math_vec4 k_red = rjd_math_vec4_xyzw(1,0,0,1);
-			const rjd_math_vec4 k_green = rjd_math_vec4_xyzw(0,1,0,1);
-			const rjd_math_vec4 k_blue = rjd_math_vec4_xyzw(0,0,1,1);
-
-			float* tints = rjd_mem_alloc_array(float, num_verts * 4, app->allocator);
-			for (uint32_t i = 0; i < num_verts * 4; i += 12) {
-				rjd_math_vec4_write(k_red, tints + i);
-				rjd_math_vec4_write(k_green, tints + i + 4);
-				rjd_math_vec4_write(k_blue, tints + i + 8);
-			}
-
-			struct rjd_gfx_mesh_vertex_buffer_desc buffers_desc[] =
-			{
-				// vertices
-				{
-					.common = {
-						.vertex = {
-							.data = positions,
-							.length = num_verts * sizeof(float) * 3,
-							.stride = sizeof(float) * 3,
-						}
-					},
-					.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-					.buffer_index = 0,
-				},
-				// tints
-				{
-					.common = {
-						.vertex = {
-							.data = tints,
-							.length = num_verts * sizeof(float) * 4,
-							.stride = sizeof(float) * 4,
-						}
-					},
-					.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-					.buffer_index = 1,
-				},
-				// constants
-				{
-					.common = {
-						.constant = {
-							.capacity = rjd_math_maxu32(sizeof(struct shader_constants), 256) * 3,
-						}
-					},
-					.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
-					.buffer_index = 2,
-				}
-			};
-
-			struct rjd_gfx_mesh_vertexed_desc desc =
-			{
-				.primitive = RJD_GFX_PRIMITIVE_TYPE_TRIANGLES,
-				.buffers = buffers_desc,
-				.count_buffers = rjd_countof(buffers_desc),
-				.count_vertices = num_verts,
-			};
-
-			struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, app->gfx.meshes + geo, desc);
-			if (!rjd_result_isok(result)) {
-				RJD_LOG("Error creating mesh: %s", result.error);
-			}
-
-			rjd_mem_free(positions);
-			rjd_mem_free(tints);
-		}
+		//meshes_init_procedural(app);
+		meshes_init_chess(app);
 	}
 
 	{
@@ -302,14 +435,16 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 		}
 	}
 
+	uint32_t total_meshes = rjd_array_count(app->gfx.meshes);
+
 	if (rjd_input_keyboard_triggered(app->input, RJD_INPUT_KEYBOARD_ARROW_LEFT) ||
 		rjd_input_mouse_triggered(app->input, RJD_INPUT_MOUSE_BUTTON_RIGHT)) {
-		app->current_mesh_index = (app->current_mesh_index + RJD_PROCGEO_TYPE_COUNT - 1) % RJD_PROCGEO_TYPE_COUNT;
+		app->current_mesh_index = (app->current_mesh_index + total_meshes - 1) % total_meshes;
 	}
 
 	if (rjd_input_keyboard_triggered(app->input, RJD_INPUT_KEYBOARD_ARROW_RIGHT) ||
 		rjd_input_mouse_triggered(app->input, RJD_INPUT_MOUSE_BUTTON_LEFT)) {
-		app->current_mesh_index = (app->current_mesh_index + 1) % RJD_PROCGEO_TYPE_COUNT;
+		app->current_mesh_index = (app->current_mesh_index + 1) % total_meshes;
 	}
 
 	rjd_input_markframe(app->input);
@@ -362,15 +497,15 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 			rjd_math_mat4 model_matrix;
 			{
 				static float s_rotation_x = 0;
-				static float s_rotation_y = 5 * RJD_MATH_PI / 6.0f;
-				rjd_math_mat4 trans = rjd_math_mat4_translation(rjd_math_vec3_xyz(0, 0, 0));
+				static float s_rotation_y = 0;
+				rjd_math_mat4 trans = rjd_math_mat4_translation(rjd_math_vec3_xyz(0, -0.7, 0));
 				rjd_math_mat4 rot1 = rjd_math_mat4_rotationx(s_rotation_x);
 				rjd_math_mat4 rot2 = rjd_math_mat4_rotationy(s_rotation_y);
 				model_matrix = rjd_math_mat4_mul(rot1, rot2);
 				model_matrix = rjd_math_mat4_mul(trans, model_matrix);
 
 				float speed = 8;
-				s_rotation_x += (RJD_MATH_PI * 2.0f / (60.0f * 1 * speed));
+				//s_rotation_x += (RJD_MATH_PI * 2.0f / (60.0f * 1 * speed));
 				s_rotation_y += (RJD_MATH_PI * 2.0f / (60.0f * 2 * speed));
 			}
 			
@@ -431,7 +566,7 @@ void window_close(struct rjd_window* window, const struct rjd_window_environment
 	rjd_input_destroy(app->input);
 	rjd_mem_free(app->input);
 
-	for (uint32_t i = 0; i < RJD_PROCGEO_TYPE_COUNT; ++i) {
+	for (uint32_t i = 0; i < rjd_array_count(app->gfx.meshes); ++i) {
 		if (rjd_slot_isvalid(app->gfx.meshes[i].handle)) {
 			rjd_gfx_mesh_destroy(app->gfx.context, app->gfx.meshes + i);
 		}
@@ -450,6 +585,6 @@ void window_close(struct rjd_window* window, const struct rjd_window_environment
 	rjd_mem_free(app->gfx.shader_vertex);
 	rjd_mem_free(app->gfx.shader_pixel);
 	rjd_mem_free(app->gfx.pipeline_state);
-	rjd_mem_free(app->gfx.meshes);
+	rjd_array_free(app->gfx.meshes);
 }
 

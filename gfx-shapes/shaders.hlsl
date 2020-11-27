@@ -32,6 +32,6 @@ VS_INOUT vertexShader(VS_INOUT input)
 PS_OUTPUT pixelShader(VS_INOUT input)
 {
     PS_OUTPUT output;
-    output.color = input.color;
+    output.color = normalize(input.position);
     return output;
 }
