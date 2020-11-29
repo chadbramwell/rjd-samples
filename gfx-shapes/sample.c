@@ -8,6 +8,11 @@ struct shader_constants
 	rjd_math_mat4 modelview_matrix;
 };
 
+uint32_t calc_shader_constants_stride()
+{
+	return rjd_gfx_calc_constant_buffer_stride(sizeof(struct shader_constants));
+}
+
 void env_init(const struct rjd_window_environment* env)
 {
 	struct app_data* app = env->userdata;
@@ -52,8 +57,8 @@ void env_close(const struct rjd_window_environment* env)
 
 void meshes_init_chess(struct app_data* app)
 {
-	// "binmesh" file format: [uint32_t num verts][uint32_t num inds][verts float3...][inds uint32_t * 3 ...]
-	const char* mesh_paths[] = { "pawn.binmesh", "bishop.binmesh", "castle.binmesh", "knight.binmesh", "king.binmesh", "pawn.binmesh" };
+	// "binmesh" file format: [u32 num verts and normals][u32 num inds][verts float3...][normals float3...][inds u32 * 3 ...]
+	const char* mesh_paths[] = { "pawn.binmesh", "bishop.binmesh", "castle.binmesh", "knight.binmesh", "king.binmesh", "queen.binmesh" };
 	int num_meshes = rjd_countof(mesh_paths);
 	app->gfx.meshes = rjd_array_alloc(struct rjd_gfx_mesh, num_meshes, app->allocator);
 
@@ -61,7 +66,7 @@ void meshes_init_chess(struct app_data* app)
 	for (int i = 0; i < num_meshes; ++i)
 	{
 		uint32_t num_verts = 0, num_tris = 0;
-		void *verts = NULL, *inds = NULL;
+		void *verts = NULL, *normals = NULL, *inds = NULL;
 		{
 			char* file_buffer = NULL;
 			struct rjd_result result = rjd_fio_read(mesh_paths[i], &file_buffer, app->allocator);
@@ -75,10 +80,18 @@ void meshes_init_chess(struct app_data* app)
 			file_iter += sizeof(num_verts);
 			memcpy(&num_tris, file_iter, sizeof(num_tris));
 			file_iter += sizeof(num_tris);
-			RJD_ASSERT(file_size == sizeof(uint32_t) * 2 + num_verts * sizeof(float) * 3 + num_tris * sizeof(uint32_t) * 3);
+			RJD_ASSERT(file_size == 
+				sizeof(uint32_t) * 2 + 
+				num_verts * sizeof(float) * 3 + 
+				num_verts * sizeof(float) * 3 + // normals
+				num_tris * sizeof(uint32_t) * 3);
 
 			verts = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
 			memcpy(verts, file_iter, num_verts * 3 * sizeof(float));
+			file_iter += num_verts * 3 * sizeof(float);
+
+			normals = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
+			memcpy(normals, file_iter, num_verts * 3 * sizeof(float));
 			file_iter += num_verts * 3 * sizeof(float);
 
 			inds = rjd_mem_alloc_array(uint32_t, num_tris * 3, app->allocator);
@@ -88,22 +101,62 @@ void meshes_init_chess(struct app_data* app)
 			// verify we reached end of file
 			RJD_ASSERT(file_iter == file_buffer + file_size);
 		}
+#if 0
+		float* test = malloc(num_verts * sizeof(float) * 7);
+		for(uint32_t i = 0; i < num_verts; ++i)
+		{
+			test[i * 7 + 0] = ((float*)verts)[i * 3 + 0];
+			test[i * 7 + 1] = ((float*)verts)[i * 3 + 1];
+			test[i * 7 + 2] = ((float*)verts)[i * 3 + 2];
+			test[i * 7 + 3] = 1.0f;
 
-		const rjd_math_vec4 k_red = rjd_math_vec4_xyzw(1, 0, 0, 1);
-		const rjd_math_vec4 k_green = rjd_math_vec4_xyzw(0, 1, 0, 1);
-		const rjd_math_vec4 k_blue = rjd_math_vec4_xyzw(0, 0, 1, 1);
-
-		float* tints = rjd_mem_alloc_array(float, num_verts * 4, app->allocator);
-		for (uint32_t i = 0; i < num_verts; ++i) {
-			if(i%3 == 0)
-				rjd_math_vec4_write_unaligned(k_red, tints + i);
-			else if(i%3 == 1)
-				rjd_math_vec4_write_unaligned(k_green, tints + i);
-			else
-				rjd_math_vec4_write_unaligned(k_blue, tints + i);
+			test[i * 7 + 3] = ((float*)normals)[i * 3 + 0];
+			test[i * 7 + 4] = ((float*)normals)[i * 3 + 1];
+			test[i * 7 + 5] = ((float*)normals)[i * 3 + 2];
 		}
 
-		struct rjd_gfx_mesh_vertex_buffer_desc buffers_desc[] =
+		struct rjd_gfx_mesh_buffer_desc buffers_desc[] =
+		{
+			// vertices
+			{
+				.common = {
+					.vertex = {
+						.data = test,
+						.length = num_verts * sizeof(float) * 7,
+						.stride = sizeof(float) * 7,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+				.shader_slot_metal = 0,
+				.shader_slot_d3d11 = 0,
+			},
+			// indices
+			{
+				.common = {
+					.vertex = {
+						.data = inds,
+						.length = num_tris * sizeof(uint32_t) * 3,
+						.stride = sizeof(uint32_t),
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_INDEX,
+				.shader_slot_metal = 0,
+				.shader_slot_d3d11 = 0,
+			},
+			// constants
+			{
+				.common = {
+					.constant = {
+						.capacity = calc_shader_constants_stride() * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
+				.shader_slot_metal = 2,
+				.shader_slot_d3d11 = 0,
+			}
+		};
+#else
+		struct rjd_gfx_mesh_buffer_desc buffers_desc[] =
 		{
 			// vertices
 			{
@@ -115,43 +168,48 @@ void meshes_init_chess(struct app_data* app)
 					}
 				},
 				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-				.buffer_index = 0,
+				.shader_slot_metal = 0,
+				.shader_slot_d3d11 = 0,
 			},
-			// tints
-			//{
-			//	.common = {
-			//		.vertex = {
-			//			.data = tints,
-			//			.length = num_verts * sizeof(float) * 4,
-			//			.stride = sizeof(float) * 4,
-			//		}
-			//	},
-			//	.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-			//	.buffer_index = 1,
-			//},
+			// normals
+			{
+				.common = {
+					.vertex = {
+						.data = normals,
+						.length = num_verts * sizeof(float) * 3,
+						.stride = sizeof(float) * 3,
+					}
+				},
+				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
+				.shader_slot_metal = 1,
+				.shader_slot_d3d11 = 1,
+			},
 			// indices
 			{
 				.common = {
-					.index = {
+					.vertex = {
 						.data = inds,
 						.length = num_tris * sizeof(uint32_t) * 3,
-						.stride = sizeof(uint32_t),
+						.stride = sizeof(uint32_t) * 3,
 					}
 				},
 				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_INDEX,
-				.buffer_index = 0, // "slot" in d3d. Not used at all for indices
+				.shader_slot_metal = 0,
+				.shader_slot_d3d11 = 0,
 			},
 			// constants
 			{
 				.common = {
 					.constant = {
-						.capacity = rjd_math_maxu32(sizeof(struct shader_constants), 256) * 3,
+						.capacity = calc_shader_constants_stride() * 3,
 					}
 				},
 				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
-				.buffer_index = 2,
+				.shader_slot_metal = 2,
+				.shader_slot_d3d11 = 2,
 			}
 		};
+#endif
 
 		struct rjd_gfx_mesh_vertexed_desc desc =
 		{
@@ -162,98 +220,17 @@ void meshes_init_chess(struct app_data* app)
 			.count_indices = num_tris * 3,
 		};
 
-		struct rjd_gfx_mesh* mesh = rjd_array_push_no_init(app->gfx.meshes);
-		struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, mesh, desc);
+		struct rjd_gfx_mesh mesh = { 0 };
+		struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, &mesh, desc);
 		if (!rjd_result_isok(result)) {
 			RJD_ASSERT(rjd_result_isok(result));
 			RJD_LOG("Error creating mesh: %s", result.error);
 		}
+		rjd_array_push(app->gfx.meshes, mesh);
 
 		rjd_mem_free(verts);
+		rjd_mem_free(normals);
 		rjd_mem_free(inds);
-		rjd_mem_free(tints);
-	}
-}
-
-void meshes_init_procedural(struct app_data* app)
-{
-	app->gfx.meshes = rjd_array_alloc(struct rjd_gfx_mesh, RJD_PROCGEO_TYPE_COUNT, app->allocator);
-
-	// meshes
-	for (enum rjd_procgeo_type geo = 0; geo < RJD_PROCGEO_TYPE_COUNT; ++geo)
-	{
-		const float shape_size = .5;
-		const uint32_t tesselation = 16;
-
-		const uint32_t num_verts = rjd_procgeo_calc_num_verts(geo, tesselation);
-		float* positions = rjd_mem_alloc_array(float, num_verts * 3, app->allocator);
-		rjd_procgeo(geo, tesselation, shape_size, shape_size, shape_size, positions, num_verts * 3, 0);
-
-		const rjd_math_vec4 k_red = rjd_math_vec4_xyzw(1,0,0,1);
-		const rjd_math_vec4 k_green = rjd_math_vec4_xyzw(0,1,0,1);
-		const rjd_math_vec4 k_blue = rjd_math_vec4_xyzw(0,0,1,1);
-
-		float* tints = rjd_mem_alloc_array(float, num_verts * 4, app->allocator);
-		for (uint32_t i = 0; i < num_verts * 4; i += 12) {
-			rjd_math_vec4_write(k_red, tints + i);
-			rjd_math_vec4_write(k_green, tints + i + 4);
-			rjd_math_vec4_write(k_blue, tints + i + 8);
-		}
-
-		struct rjd_gfx_mesh_vertex_buffer_desc buffers_desc[] =
-		{
-			// vertices
-			{
-				.common = {
-					.vertex = {
-						.data = positions,
-						.length = num_verts * sizeof(float) * 3,
-						.stride = sizeof(float) * 3,
-					}
-				},
-				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-				.buffer_index = 0,
-			},
-			// tints
-			{
-				.common = {
-					.vertex = {
-						.data = tints,
-						.length = num_verts * sizeof(float) * 4,
-						.stride = sizeof(float) * 4,
-					}
-				},
-				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX,
-				.buffer_index = 1,
-			},
-			// constants
-			{
-				.common = {
-					.constant = {
-						.capacity = rjd_math_maxu32(sizeof(struct shader_constants), 256) * 3,
-					}
-				},
-				.usage_flags = RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT | RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT,
-				.buffer_index = 2,
-			}
-		};
-
-		struct rjd_gfx_mesh_vertexed_desc desc =
-		{
-			.primitive = RJD_GFX_PRIMITIVE_TYPE_TRIANGLES,
-			.buffers = buffers_desc,
-			.count_buffers = rjd_countof(buffers_desc),
-			.count_vertices = num_verts,
-		};
-
-		struct rjd_gfx_mesh* mesh = rjd_array_push_no_init(app->gfx.meshes);
-		struct rjd_result result = rjd_gfx_mesh_create_vertexed(app->gfx.context, mesh, desc);
-		if (!rjd_result_isok(result)) {
-			RJD_LOG("Error creating mesh: %s", result.error);
-		}
-
-		rjd_mem_free(positions);
-		rjd_mem_free(tints);
 	}
 }
 
@@ -269,7 +246,8 @@ void window_init(struct rjd_window* window, const struct rjd_window_environment*
 	app->gfx.texture = rjd_mem_alloc(struct rjd_gfx_texture, app->allocator);
 	app->gfx.shader_vertex = rjd_mem_alloc(struct rjd_gfx_shader, app->allocator);
 	app->gfx.shader_pixel = rjd_mem_alloc(struct rjd_gfx_shader, app->allocator);
-	app->gfx.pipeline_state = rjd_mem_alloc(struct rjd_gfx_pipeline_state, app->allocator);
+	app->gfx.pipeline_state_cullback = rjd_mem_alloc(struct rjd_gfx_pipeline_state, app->allocator);
+	//app->gfx.pipeline_state_cullnone = rjd_mem_alloc(struct rjd_gfx_pipeline_state, app->allocator);
 
 	{
 		uint32_t msaa_sample_counts[] = { 16, 8, 4, 2, 1 };
@@ -376,20 +354,23 @@ void window_init(struct rjd_window* window, const struct rjd_window_environment*
 					.step = RJD_GFX_VERTEX_FORMAT_STEP_VERTEX,
 					.semantic = RJD_GFX_VERTEX_SEMANTIC_POSITION,
 					.attribute_index = 0,
-					.buffer_index = 0,
+					.shader_slot_metal = 0,
+					.shader_slot_d3d11 = 0,
 					.stride = sizeof(float) * 3,
 					.step_rate = 1,
 					.offset = 0,
 				},
-				// tint
+				// normal
 				{
-					.type = RJD_GFX_VERTEX_FORMAT_TYPE_FLOAT4,
+					.type = RJD_GFX_VERTEX_FORMAT_TYPE_FLOAT3,
 					.step = RJD_GFX_VERTEX_FORMAT_STEP_VERTEX,
-					.semantic = RJD_GFX_VERTEX_SEMANTIC_COLOR,
+					.semantic = RJD_GFX_VERTEX_SEMANTIC_NORMAL,
 					.attribute_index = 1,
-					.buffer_index = 1,
-					.stride = sizeof(float) * 4,
+					.shader_slot_metal = 1,
+					.shader_slot_d3d11 = 1,
+					.stride = sizeof(float) * 3,
 					.step_rate = 1,
+					.offset = 0,
 				},
 			};
 			
@@ -402,17 +383,23 @@ void window_init(struct rjd_window* window, const struct rjd_window_environment*
 				.vertex_attributes = vertex_attributes,
 				.count_vertex_attributes = rjd_countof(vertex_attributes),
 				.depth_compare = RJD_GFX_DEPTH_COMPARE_GREATEREQUAL,
-	            .winding_order = RJD_GFX_WINDING_ORDER_CLOCKWISE,
+	            .winding_order = RJD_GFX_WINDING_ORDER_COUNTERCLOCKWISE,
 	            .cull_mode = RJD_GFX_CULL_BACK,
 	            // .cull_mode = RJD_GFX_CULL_NONE,
 			};
-			struct rjd_result result = rjd_gfx_pipeline_state_create(app->gfx.context, app->gfx.pipeline_state, desc);
+			struct rjd_result result = rjd_gfx_pipeline_state_create(app->gfx.context, app->gfx.pipeline_state_cullback, desc);
 			if (!rjd_result_isok(result)) {
 				RJD_LOG("Error creating pipeline state: %s", result.error);
 			}
+
+			//desc.cull_mode = RJD_GFX_CULL_NONE;
+
+			//result = rjd_gfx_pipeline_state_create(app->gfx.context, app->gfx.pipeline_state_cullnone, desc);
+			//if (!rjd_result_isok(result)) {
+			//	RJD_LOG("Error creating pipeline state: %s", result.error);
+			//}
 		}
 
-		//meshes_init_procedural(app);
 		meshes_init_chess(app);
 	}
 
@@ -474,6 +461,8 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 
 	// draw a quad
 	{
+		struct rjd_gfx_pass_draw_buffer_offset_desc buffer_offset_descs[1] = { 0 };
+
 		// update constant buffer transforms
 		{
 			const struct rjd_window_size bounds = rjd_window_size_get(window);
@@ -498,7 +487,7 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 			{
 				static float s_rotation_x = 0;
 				static float s_rotation_y = 0;
-				rjd_math_mat4 trans = rjd_math_mat4_translation(rjd_math_vec3_xyz(0, -0.7, 0));
+				rjd_math_mat4 trans = rjd_math_mat4_translation(rjd_math_vec3_xyz(0, -0.7f, 0));
 				rjd_math_mat4 rot1 = rjd_math_mat4_rotationx(s_rotation_x);
 				rjd_math_mat4 rot2 = rjd_math_mat4_rotationy(s_rotation_y);
 				model_matrix = rjd_math_mat4_mul(rot1, rot2);
@@ -506,27 +495,25 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 
 				float speed = 8;
 				//s_rotation_x += (RJD_MATH_PI * 2.0f / (60.0f * 1 * speed));
-				s_rotation_y += (RJD_MATH_PI * 2.0f / (60.0f * 2 * speed));
+				s_rotation_y += (RJD_MATH_PI * 2.0f / (60.0f * 1 * speed));
 			}
 			
 			const struct shader_constants constants = {
-				.proj_matrix = proj_matrix,
-				.modelview_matrix = rjd_math_mat4_mul(view_matrix, model_matrix)
+				.proj_matrix = rjd_math_mat4_transpose(proj_matrix),
+				.modelview_matrix = rjd_math_mat4_transpose(rjd_math_mat4_mul(view_matrix, model_matrix))
 			};
 			
 			// Upload matrices to constant buffer
-			uint32_t buffer_index = 2;
-			uint32_t offset = 0;
+			const uint32_t buffer_index = 3;
+			const uint32_t stride = calc_shader_constants_stride();
+			const uint32_t offset = rjd_gfx_current_backbuffer_index(app->gfx.context) * stride;
 
-			// TODO fix hacky frame_index: we can do this by specifying the number of buffers we use for backbuffers.
-			// Default in metal is triple-buffering which is why this works
-			if (rjd_gfx_backend_ismetal()) {
-				static uint32_t frame_index = 0;
-				offset = frame_index * rjd_math_maxu32(sizeof(struct shader_constants), 256);
-				frame_index = (frame_index + 1) % 3;
-			}
-			
 			rjd_gfx_mesh_modify(app->gfx.context, &command_buffer, app->gfx.meshes + app->current_mesh_index, buffer_index, offset, &constants, sizeof(constants));
+
+			buffer_offset_descs[0].mesh_index = 0;
+			buffer_offset_descs[0].buffer_index = buffer_index;
+			buffer_offset_descs[0].offset_bytes = offset;
+			buffer_offset_descs[0].range_bytes = stride;
 		}
 
 		const struct rjd_window_size window_size = rjd_window_size_get(app->window);
@@ -536,13 +523,21 @@ bool window_update(struct rjd_window* window, const struct rjd_window_environmen
 		};
 		const uint32_t texture_indices[] = {0};
 
+		const struct rjd_gfx_pipeline_state* pipeline_state = app->gfx.pipeline_state_cullback;
+		//if (app->current_mesh_index == RJD_PROCGEO_TYPE_RECT ||
+		//	app->current_mesh_index == RJD_PROCGEO_TYPE_CIRCLE) {
+		//	pipeline_state = app->gfx.pipeline_state_cullnone;
+		//}
+
 		struct rjd_gfx_pass_draw_desc desc = {
 			.viewport = &viewport,
-			.pipeline_state = app->gfx.pipeline_state,
+			.pipeline_state = pipeline_state,
 			.meshes = app->gfx.meshes + app->current_mesh_index,
+			.buffer_offset_descs = buffer_offset_descs,
 			.textures = app->gfx.texture,
 			.texture_indices = texture_indices,
 			.count_meshes = 1,
+			.count_constant_descs = 1,
 			.count_textures = 0,
 			.debug_label = "a shape",
 		};
@@ -575,7 +570,8 @@ void window_close(struct rjd_window* window, const struct rjd_window_environment
 	if (rjd_slot_isvalid(app->gfx.texture->handle)) {
 		rjd_gfx_texture_destroy(app->gfx.context, app->gfx.texture);
 	}
-	rjd_gfx_pipeline_state_destroy(app->gfx.context, app->gfx.pipeline_state);
+	rjd_gfx_pipeline_state_destroy(app->gfx.context, app->gfx.pipeline_state_cullback);
+	//rjd_gfx_pipeline_state_destroy(app->gfx.context, app->gfx.pipeline_state_cullnone);
 	rjd_gfx_shader_destroy(app->gfx.context, app->gfx.shader_vertex);
 	rjd_gfx_shader_destroy(app->gfx.context, app->gfx.shader_pixel);
 	rjd_gfx_context_destroy(app->gfx.context);
@@ -584,7 +580,8 @@ void window_close(struct rjd_window* window, const struct rjd_window_environment
 	rjd_mem_free(app->gfx.texture);
 	rjd_mem_free(app->gfx.shader_vertex);
 	rjd_mem_free(app->gfx.shader_pixel);
-	rjd_mem_free(app->gfx.pipeline_state);
+	rjd_mem_free(app->gfx.pipeline_state_cullback);
+	//rjd_mem_free(app->gfx.pipeline_state_cullnone);
 	rjd_array_free(app->gfx.meshes);
 }
 
